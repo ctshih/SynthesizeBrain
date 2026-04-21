@@ -38,45 +38,51 @@ def cmd_index(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_synthesize(args: argparse.Namespace) -> None:
-    cache = load_index(args.cache)
-    N = int(args.n)
-    out_dir = args.out or (DEFAULT_OUT_ROOT / f"output_N{N}")
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _run_one(
+    N: int,
+    cache: dict,
+    cache_dir: Path,
+    warp_dir: Path,
+    seed: int,
+    out_root: Path,
+    out_override: Path | None = None,
+) -> dict:
+    """Run selection + synthesis for a single N. Returns a stats dict.
 
-    warp_dir = args.warp_dir
+    Output directory naming: if `out_override` is given we respect it
+    verbatim; otherwise we build `{out_root}/output_N{requested}_K{achieved}/`
+    after we know K, so the name truthfully reports "requested 500, got 148".
+    """
     canvas_dims = tuple(int(v) for v in cache["canvas_dims"])
     canvas_bbox = tuple(float(v) for v in cache["canvas_bbox"])
+    voxel_size = tuple(float(v) for v in cache["voxel_size"])
 
     t0 = time.perf_counter()
-    sel = select(cache=cache, N=N, warp_dir=warp_dir, cache_dir=args.cache.parent, seed=args.seed)
+    sel = select(cache=cache, N=N, warp_dir=warp_dir, cache_dir=cache_dir, seed=seed)
     t_select = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     intensity, labels = compose(sel, canvas_dims)
     t_compose = time.perf_counter() - t0
 
-    # Sanity checks.
     nz_int = int((intensity > 0).sum())
     nz_lbl = int((labels > 0).sum())
     assert nz_int == nz_lbl, f"intensity/label non-zero mismatch: {nz_int} vs {nz_lbl}"
-    unique_labels = np.unique(labels)
     K = len(sel.indices)
-    assert len(unique_labels) == K + 1, (
-        f"unique labels {len(unique_labels)} != K+1={K+1}"
-    )
+    unique_labels = np.unique(labels)
+    assert len(unique_labels) == K + 1, f"unique labels {len(unique_labels)} != K+1={K+1}"
+
+    out_dir = Path(out_override) if out_override is not None else (out_root / f"output_N{N}_K{K}")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    voxel_size = tuple(float(v) for v in cache["voxel_size"])
     write_ushort_amira(out_dir / "intensity.am", intensity, canvas_bbox)
     write_ushort_amira(out_dir / "labels.am", labels, canvas_bbox)
     write_nifti(out_dir / "intensity.nii.gz", intensity, canvas_bbox, voxel_size)
     write_nifti(out_dir / "labels.nii.gz", labels, canvas_bbox, voxel_size)
-    write_mip(out_dir / "mip.png", intensity, labels, seed=args.seed)
+    write_mip(out_dir / "mip.png", intensity, labels, seed=seed)
     t_write = time.perf_counter() - t0
 
-    # neuron_list.tsv
     tsv_path = out_dir / "neuron_list.tsv"
     with open(tsv_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
@@ -110,60 +116,71 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
           f"write={t_write:.1f}s")
     print(f"[synth] written to {out_dir}/")
 
+    return {
+        "N_requested": N,
+        "N_achieved": K,
+        "out_dir": str(out_dir),
+        "t_select": t_select,
+        "t_compose": t_compose,
+        "t_write": t_write,
+        "coverage_mean": float(sel.bbox_coverages.mean()),
+        "coverage_min": float(sel.bbox_coverages.min()),
+        "coverage_violators": int((sel.bbox_coverages < 0.5).sum()),
+        "total_nz_voxels": nz_int,
+    }
+
+
+def cmd_synthesize(args: argparse.Namespace) -> None:
+    cache = load_index(args.cache)
+    _run_one(
+        N=int(args.n),
+        cache=cache,
+        cache_dir=args.cache.parent,
+        warp_dir=args.warp_dir,
+        seed=args.seed,
+        out_root=DEFAULT_OUT_ROOT,
+        out_override=args.out,
+    )
+
 
 def cmd_sweep(args: argparse.Namespace) -> None:
     """Run synthesize for each N in args.ns; summarise results per run."""
-    # Re-use cmd_synthesize's implementation but log per-N into a summary file.
-    summary_path = args.out_root / "sweep_summary.tsv"
+    cache = load_index(args.cache)
     args.out_root.mkdir(parents=True, exist_ok=True)
     rows = []
     for N in args.ns:
         print(f"\n======= N = {N} =======")
-        run_args = argparse.Namespace(
-            n=N,
-            out=args.out_root / f"output_N{N}",
-            cache=args.cache,
+        t_start = time.perf_counter()
+        stats = _run_one(
+            N=N,
+            cache=cache,
+            cache_dir=args.cache.parent,
             warp_dir=args.warp_dir,
             seed=args.seed,
+            out_root=args.out_root,
         )
-        t_start = time.perf_counter()
-        cmd_synthesize(run_args)
-        t_elapsed = time.perf_counter() - t_start
+        stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
+        rows.append(stats)
 
-        # Collect per-run stats from neuron_list.tsv.
-        tsv_path = run_args.out / "neuron_list.tsv"
-        coverages = []
-        voxel_counts = []
-        with open(tsv_path) as fh:
-            next(fh)  # header
-            for line in fh:
-                parts = line.rstrip("\n").split("\t")
-                voxel_counts.append(int(parts[3]))
-                coverages.append(float(parts[4]))
-        coverages = np.array(coverages)
-        voxel_counts = np.array(voxel_counts)
-        rows.append({
-            "N_requested": N,
-            "N_achieved": len(coverages),
-            "elapsed_s": round(t_elapsed, 1),
-            "coverage_mean": round(float(coverages.mean()), 3),
-            "coverage_min": round(float(coverages.min()), 3),
-            "coverage_violators": int((coverages < 0.5).sum()),
-            "total_nz_voxels": int(voxel_counts.sum()),
-        })
-
+    summary_path = args.out_root / "sweep_summary.tsv"
+    cols = ["N_requested", "N_achieved", "elapsed_s", "coverage_mean",
+            "coverage_min", "coverage_violators", "total_nz_voxels", "out_dir"]
     with open(summary_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
-        w.writerow(list(rows[0].keys()))
+        w.writerow(cols)
         for r in rows:
-            w.writerow([r[k] for k in rows[0].keys()])
+            w.writerow([
+                r["N_requested"], r["N_achieved"], r["elapsed_s"],
+                round(r["coverage_mean"], 3), round(r["coverage_min"], 3),
+                r["coverage_violators"], r["total_nz_voxels"], r["out_dir"],
+            ])
     print(f"\n[sweep] summary written to {summary_path}")
     for r in rows:
         print(f"  N={r['N_requested']:>4}: got {r['N_achieved']:>4}, "
               f"elapsed {r['elapsed_s']:>6.1f}s, "
               f"coverage mean={r['coverage_mean']:.3f} min={r['coverage_min']:.3f} "
               f"viol={r['coverage_violators']}, "
-              f"nz={r['total_nz_voxels']}")
+              f"nz={r['total_nz_voxels']}  -> {r['out_dir']}")
 
 
 def main() -> None:
@@ -181,13 +198,15 @@ def main() -> None:
 
     p_syn = sub.add_parser("synthesize", help="Compose a single N-neuron volume pair.")
     p_syn.add_argument("--n", type=int, required=True)
-    p_syn.add_argument("--out", type=Path, default=None)
+    p_syn.add_argument("--out", type=Path, default=None,
+                       help="Override the auto-named output dir (default: "
+                            "output/output_N{requested}_K{achieved}/).")
     p_syn.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     p_syn.add_argument("--warp-dir", type=Path, default=DEFAULT_WARP_DIR)
     p_syn.add_argument("--seed", type=int, default=42)
     p_syn.set_defaults(func=cmd_synthesize)
 
-    p_sw = sub.add_parser("sweep", help="Run synthesize for N in 10/50/100/500.")
+    p_sw = sub.add_parser("sweep", help="Run synthesize for several N values.")
     p_sw.add_argument("--ns", type=int, nargs="+", default=[10, 50, 100, 500])
     p_sw.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     p_sw.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)

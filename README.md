@@ -6,7 +6,8 @@ single-neuron auto-segmentation on dense-staining brain images.
 
 ## What it produces
 
-For each chosen `N`, a directory under `output/output_N{N}/` containing:
+For each chosen `N`, a directory under `output/output_N{requested}_K{achieved}/`
+containing (e.g. requesting N=500 and getting K=148 yields `output/output_N500_K148/`):
 
 - `intensity.am` / `intensity.nii.gz` — uint16, voxel values = original warp
   intensities where a selected neuron lives, 0 elsewhere.
@@ -54,7 +55,8 @@ Defaults:
 - cache:    `cache/warp_index.npz` (plus `cache/candidate_scores.npz` after
             the first selection — this amortises the ~minute-long coverage-
             map + score pass across runs).
-- output:   `output/output_N{N}/`
+- output:   `output/output_N{requested}_K{achieved}/` (name reveals the
+            packing ceiling at a glance)
 - canvas:   derived from the union of all 9987 per-neuron bboxes (989×646×337
             at 1-voxel spacing for the current dataset).
 
@@ -107,6 +109,6 @@ synthesize_brain/
 ├── nifti_io.py                # NIfTI writer
 └── select.py                  # Phase 2
 cache/                         # warp_index.npz, candidate_scores.npz
-output/                        # output_N{N}/, sweep_summary.tsv
+output/                        # output_N{req}_K{ach}/, sweep_summary.tsv
 tasks/                         # todo.md, lessons.md
 ```
