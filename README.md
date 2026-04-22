@@ -23,6 +23,28 @@ For each run, a directory named
 - `neuron_list.tsv` — `label_id, filename, driver, phase, voxel_count,
   bbox_coverage, origin_{ix,iy,iz}, lattice_{nx,ny,nz}`. The `phase` column
   is `greedy` / `repair` / `expand` — see "Selection phases" below.
+## Gaussian noise on intensity.am
+
+Every synthesize run adds N(0, σ) additive Gaussian noise to
+`intensity.am` (default σ = 50), clipped to [0, 65535] so the uint16
+domain is preserved. This gives realistic shot-noise texture in the
+background and on top of neurons, without touching the label
+ground-truth. To disable:
+
+```bash
+python synthesize.py synthesize --noise-sigma 0
+```
+
+To retrofit noise on an existing output dir (rewrites
+`intensity.am`, `intensity.nii.gz`, and `mip.png`; `labels.am`,
+`contacts.csv`, `scan_video.mp4` are untouched):
+
+```bash
+python synthesize.py noise --dir output/output_N500_K139_R141_s3460920629 --sigma 50
+```
+
+---
+
 ## Inspecting individual labels in Avizo
 
 Open `labels.am` (label field) + `colormaps/bandpass_white.am` in Avizo,

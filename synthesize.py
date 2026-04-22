@@ -22,6 +22,7 @@ from synthesize_brain.contacts import write_contacts_csv
 from synthesize_brain.index import build_index, load_index
 from synthesize_brain.mip import random_label_colors, write_mip
 from synthesize_brain.nifti_io import write_nifti
+from synthesize_brain.noise import add_gaussian_noise
 from synthesize_brain.scan_video import write_scan_video
 from synthesize_brain.select import select
 
@@ -47,6 +48,7 @@ def _run_one(
     warp_dir: Path,
     seed: int | None,
     rand_sigma: float,
+    noise_sigma: float,
     out_root: Path,
     out_override: Path | None = None,
 ) -> dict:
@@ -72,6 +74,16 @@ def _run_one(
     t0 = time.perf_counter()
     intensity, labels = compose(sel, canvas_dims)
     t_compose = time.perf_counter() - t0
+
+    # Gaussian noise on intensity only — labels stay crisp as the ground truth.
+    # Seed is derived from the selection seed so the whole run is reproducible.
+    if noise_sigma > 0:
+        t0 = time.perf_counter()
+        intensity = add_gaussian_noise(intensity, sigma=noise_sigma,
+                                       seed=(sel.seed_used ^ 0xA1D5_E9B7) & 0xFFFFFFFF)
+        t_noise = time.perf_counter() - t0
+        print(f"[synth] added Gaussian noise σ={noise_sigma} to intensity "
+              f"in {t_noise:.1f}s")
 
     nz_int = int((intensity > 0).sum())
     nz_lbl = int((labels > 0).sum())
@@ -185,9 +197,46 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         warp_dir=args.warp_dir,
         seed=args.seed,
         rand_sigma=args.rand_sigma,
+        noise_sigma=args.noise_sigma,
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
     )
+
+
+def cmd_noise(args: argparse.Namespace) -> None:
+    """Add Gaussian noise to an existing output dir's intensity.am.
+
+    Reads `intensity.am`, adds N(0, sigma) per-voxel Gaussian noise, clips
+    to [0, 65535], and overwrites `intensity.am` + `intensity.nii.gz` +
+    `mip.png`. `labels.am`, `labels.nii.gz`, `neuron_list.tsv`,
+    `contacts.csv`, and `scan_video.mp4` are unchanged.
+    """
+    out_dir = Path(args.dir)
+    intensity_path = out_dir / "intensity.am"
+    labels_path = out_dir / "labels.am"
+    if not intensity_path.exists() or not labels_path.exists():
+        raise FileNotFoundError(f"need intensity.am + labels.am in {out_dir}")
+
+    iv = read_amira(intensity_path)
+    intensity = iv.data
+    canvas_bbox = iv.bbox
+    # voxel_size from bbox / dims (same as canvas)
+    vx = (canvas_bbox[1] - canvas_bbox[0]) / max(iv.dims[0] - 1, 1)
+    vy = (canvas_bbox[3] - canvas_bbox[2]) / max(iv.dims[1] - 1, 1)
+    vz = (canvas_bbox[5] - canvas_bbox[4]) / max(iv.dims[2] - 1, 1)
+    voxel_size = (vx, vy, vz)
+
+    t0 = time.perf_counter()
+    noisy = add_gaussian_noise(intensity, sigma=args.sigma, seed=args.seed)
+    t_noise = time.perf_counter() - t0
+    print(f"[noise] applied σ={args.sigma} seed={args.seed} in {t_noise:.1f}s")
+
+    write_ushort_amira(intensity_path, noisy, canvas_bbox)
+    write_nifti(out_dir / "intensity.nii.gz", noisy, canvas_bbox, voxel_size)
+    # Regenerate the MIP so its intensity pane reflects the noise too.
+    labels = read_amira(labels_path).data
+    write_mip(out_dir / "mip.png", noisy, labels, seed=args.seed)
+    print(f"[noise] rewrote intensity.am, intensity.nii.gz, mip.png in {out_dir}")
 
 
 def cmd_video(args: argparse.Namespace) -> None:
@@ -246,6 +295,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             warp_dir=args.warp_dir,
             seed=args.seed,
             rand_sigma=args.rand_sigma,
+            noise_sigma=args.noise_sigma,
             out_root=args.out_root,
         )
         stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
@@ -302,6 +352,10 @@ def main() -> None:
     p_syn.add_argument("--rand-sigma", type=float, default=0.25,
                        help="Score-noise stdev as a fraction of score std "
                             "(0 disables randomness; default 0.25).")
+    p_syn.add_argument("--noise-sigma", type=float, default=50.0,
+                       help="Gaussian noise stdev added to intensity.am "
+                            "(0 = pristine; default 50, reasonable for the "
+                            "0..4095 ushort range of FlyCircuit warps).")
     p_syn.set_defaults(func=cmd_synthesize)
 
     p_ct = sub.add_parser("contacts",
@@ -318,6 +372,16 @@ def main() -> None:
                        help="Frames per second (default: 3, ~0.33s per label).")
     p_vid.set_defaults(func=cmd_video)
 
+    p_noi = sub.add_parser("noise",
+                           help="Add Gaussian noise to an existing output dir's intensity.am.")
+    p_noi.add_argument("--dir", type=Path, required=True,
+                       help="Path to an output_N{...}_K{...}/ directory.")
+    p_noi.add_argument("--sigma", type=float, default=50.0,
+                       help="Noise stdev (default 50).")
+    p_noi.add_argument("--seed", type=int, default=0,
+                       help="Noise RNG seed (default 0).")
+    p_noi.set_defaults(func=cmd_noise)
+
     p_sw = sub.add_parser("sweep", help="Run synthesize for several N values.")
     p_sw.add_argument("--ns", type=int, nargs="+", default=[10, 50, 100, 500])
     p_sw.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
@@ -325,6 +389,7 @@ def main() -> None:
     p_sw.add_argument("--warp-dir", type=Path, default=DEFAULT_WARP_DIR)
     p_sw.add_argument("--seed", type=int, default=None)
     p_sw.add_argument("--rand-sigma", type=float, default=0.25)
+    p_sw.add_argument("--noise-sigma", type=float, default=50.0)
     p_sw.set_defaults(func=cmd_sweep)
 
     args = p.parse_args()
