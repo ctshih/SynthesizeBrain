@@ -388,7 +388,13 @@ def select(
         t_exp = time.perf_counter()
         expand_added = 0
         expand_tried = 0
-        gen2 = _prefetched_reads(remaining_order, cache, warp_dir, read_cache=read_cache)
+        # Rebuild candidate pool from scratch using the CURRENT selected set
+        # so dropped-then-not-refilled violators also get another chance here.
+        # `remaining_order` alone would miss them because the repair loop only
+        # tracked "never-in-selected" items.
+        selected_set = set(selected)
+        expand_order = [int(i) for i in order if int(i) not in selected_set]
+        gen2 = _prefetched_reads(expand_order, cache, warp_dir, read_cache=read_cache)
         try:
             for idx, values, idx_tuple in gen2:
                 if len(selected) >= N:
