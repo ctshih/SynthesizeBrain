@@ -52,6 +52,7 @@ def _run_one(
     noise_baseline: float,
     out_root: Path,
     out_override: Path | None = None,
+    make_video: bool = True,
 ) -> dict:
     """Run selection + synthesis for a single N. Returns a stats dict.
 
@@ -165,10 +166,11 @@ def _run_one(
 
     # Per-label scan video — one frame per label, newest white, seen dim,
     # with a "N=i" caption. Handy for quickly eyeballing each label.
-    t0 = time.perf_counter()
-    write_scan_video(labels, out_dir / "scan_video.mp4", verbose=False)
-    t_video = time.perf_counter() - t0
-    print(f"[synth] scan_video.mp4 written in {t_video:.1f}s")
+    if make_video:
+        t0 = time.perf_counter()
+        write_scan_video(labels, out_dir / "scan_video.mp4", verbose=False)
+        t_video = time.perf_counter() - t0
+        print(f"[synth] scan_video.mp4 written in {t_video:.1f}s")
 
     print()
     print(f"[synth] requested N={N}, kept under C1 K={K}, total rendered R={R}")
@@ -209,6 +211,7 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         noise_baseline=args.noise_baseline,
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
+        make_video=not args.no_video,
     )
 
 
@@ -372,6 +375,9 @@ def main() -> None:
                             "so the background distribution stays truly Gaussian "
                             "(mean=baseline) instead of being folded at 0. "
                             "Default 100 ~ sCMOS dark-current level.")
+    p_syn.add_argument("--no-video", action="store_true",
+                       help="Skip scan_video.mp4 generation (saves ~50s per run, "
+                            "useful in batch mode where you just want the volumes).")
     p_syn.set_defaults(func=cmd_synthesize)
 
     p_ct = sub.add_parser("contacts",
