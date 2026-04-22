@@ -23,6 +23,26 @@ For each run, a directory named
 - `neuron_list.tsv` — `label_id, filename, driver, phase, voxel_count,
   bbox_coverage, origin_{ix,iy,iz}, lattice_{nx,ny,nz}`. The `phase` column
   is `greedy` / `repair` / `expand` — see "Selection phases" below.
+## Inspecting individual labels in Avizo
+
+Open `labels.am` (label field) + `colormaps/bandpass_white.am` in Avizo,
+then on the colormap port set `MinMax` to:
+
+| goal | MinMax |
+|---|---|
+| only label N | `[N - 0.5, N + 0.5]` |
+| labels A..B inclusive | `[A - 0.5, B + 0.5]` |
+| scan one label at a time | `[0.5, 1.5]` → `[1.5, 2.5]` → ... → `[K-0.5, K+0.5]` |
+
+Zero-width ranges like `[N, N]` are treated as empty by Avizo and show
+nothing — use the half-unit offset. Thin neurons may still be hard to
+see; switch Volume Rendering Composition to `max` (MIP mode) or use
+Ortho Slice for a cleaner view.
+
+---
+
+## Pairwise contact statistics
+
 - `contacts.csv` — pairwise F/E/V contact voxel counts between every pair of
   neurons that touch at least once. Columns:
   `neuron1, neuron2, N_F, N_E, N_V`.
