@@ -102,25 +102,41 @@ pip install -r requirements.txt
 
 ## Usage
 
-```bash
-# 1) One-time scan of the warp directory (cache per-neuron metadata).
-python synthesize.py index
+### First-time setup (run once)
 
-# 2) Synthesize one run (defaults: N=500, random seed each time).
+```bash
+# Scan the warp directory and cache per-neuron metadata. ~18 s on 23 workers.
+# Only needs to be re-run if the source data in Kaleido/warp/ changes.
+python synthesize.py index
+```
+
+This writes `cache/warp_index.npz` (~2 MB). Every later command reads from it.
+
+### Day-to-day commands (pick one)
+
+```bash
+# A. Synthesize one fresh run.  Defaults: N=500, random seed each time.
 python synthesize.py synthesize
 
-# 3) Reproduce a specific run by passing its seed.
+# B. Reproduce a specific run by passing its seed.
 python synthesize.py synthesize --seed 2454876261
 
-# 4) Generate N training datasets with different neuron sets (omit --seed).
+# C. Generate many training datasets in a loop (different neuron sets each).
 for i in 1 2 3 4 5; do python synthesize.py synthesize; done
 
-# 5) Recompute contacts.csv on an existing output dir.
-python synthesize.py contacts --dir output/output_N500_K148/
-
-# 6) Sweep several N values.
+# D. Sweep several N values in one go (e.g. for ceiling testing).
 python synthesize.py sweep --ns 10 50 100 500
+
+# E. Regenerate contacts.csv on an existing output dir.
+python synthesize.py contacts --dir output/output_N500_K148_R150_s.../
+
+# F. Regenerate scan_video.mp4 on an existing output dir.
+python synthesize.py video --dir output/output_N500_K148_R150_s.../
 ```
+
+A typical workflow is just `index` once + `synthesize` N times. The other
+subcommands are there for specific needs (reproduce, batch sweep,
+retrofit). You don't chain them.
 
 Defaults:
 
