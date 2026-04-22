@@ -1,7 +1,33 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Pipeline produce
 cache/
 output/
+
+# Environments / IDEs
 .venv/
+venv/
 .vscode/
 .idea/
+.env
+*.local
+
+# OS trash
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Node (for docs/build_pptx.js — dependencies live outside the repo)
+node_modules/
+
+# PPTX build intermediates
+docs/*.pdf
+docs/slide-*.jpg
+docs/SynthesizeBrain.pdf
+
+# Claude Code runtime state
+.claude/scheduled_tasks.lock

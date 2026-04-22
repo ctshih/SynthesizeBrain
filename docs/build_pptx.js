@@ -5,10 +5,29 @@
 const pptxgen = require("pptxgenjs");
 const path = require("path");
 
-const PROJECT = "C:/Users/USER/Work/SynthesizeBrain";
-const MIP_HERO = path.join(PROJECT, "output/output_N500_K150_R156_s91136998/mip.png");
-const MIP_N50 = path.join(PROJECT, "output/output_N50_K50_s1682055724/mip.png");
+// Resolve project root from this file's location (docs/build_pptx.js → one level up).
+// Works regardless of where the repo is cloned to.
+const PROJECT = path.resolve(__dirname, "..");
+// Pick the N=500 hero + N=50 MIPs dynamically so the script keeps working
+// even if specific runs no longer exist. Falls back to any available run.
+function firstMip(glob_pat) {
+    const fs = require("fs");
+    const outDir = path.join(PROJECT, "output");
+    if (!fs.existsSync(outDir)) return null;
+    const match = fs.readdirSync(outDir)
+        .filter(d => d.match(glob_pat))
+        .map(d => path.join(outDir, d, "mip.png"))
+        .find(p => fs.existsSync(p));
+    return match || null;
+}
+const MIP_HERO = firstMip(/^output_N500_/);
+const MIP_N50  = firstMip(/^output_N50_/);
 const OUTPUT_PATH = path.join(PROJECT, "docs/SynthesizeBrain.pptx");
+if (!MIP_HERO) {
+    console.error("No output_N500_* directory with mip.png found.\n" +
+                  "Run `python synthesize.py synthesize --n 500` first.");
+    process.exit(1);
+}
 
 const pres = new pptxgen();
 pres.layout = "LAYOUT_16x9";
