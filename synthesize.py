@@ -16,11 +16,11 @@ from pathlib import Path
 
 import numpy as np
 
-from synthesize_brain.amira_io import read_amira, write_ushort_amira
+from synthesize_brain.amira_io import read_amira, write_label_amira, write_ushort_amira
 from synthesize_brain.compose import compose
 from synthesize_brain.contacts import write_contacts_csv
 from synthesize_brain.index import build_index, load_index
-from synthesize_brain.mip import write_mip
+from synthesize_brain.mip import random_label_colors, write_mip
 from synthesize_brain.nifti_io import write_nifti
 from synthesize_brain.select import select
 
@@ -84,9 +84,24 @@ def _run_one(
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Shared label palette: the AmiraMesh `Materials` block and the MIP PNG
+    # use the same colors, so what you see in Avizo == what you see in mip.png.
+    label_palette = random_label_colors(K, seed=sel.seed_used)
+
+    # Build per-label names that include the driver so Avizo's Materials panel
+    # is self-describing ("VGlut_500740" instead of anonymous "Material3").
+    label_names = ["Exterior"]
+    for idx in sel.indices:
+        i = int(idx)
+        raw = str(cache["filenames"][i])
+        # e.g. "VGlut-F-500740_seg001_warp_volume.am" -> "VGlut_F_500740"
+        stem = raw.split("_seg")[0].replace("-", "_")
+        label_names.append(stem)
+
     t0 = time.perf_counter()
     write_ushort_amira(out_dir / "intensity.am", intensity, canvas_bbox)
-    write_ushort_amira(out_dir / "labels.am", labels, canvas_bbox)
+    write_label_amira(out_dir / "labels.am", labels, canvas_bbox,
+                      label_colors=label_palette, label_names=label_names)
     write_nifti(out_dir / "intensity.nii.gz", intensity, canvas_bbox, voxel_size)
     write_nifti(out_dir / "labels.nii.gz", labels, canvas_bbox, voxel_size)
     write_mip(out_dir / "mip.png", intensity, labels, seed=sel.seed_used)

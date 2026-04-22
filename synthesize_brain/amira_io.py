@@ -92,15 +92,17 @@ def read_amira(path: str | Path) -> AmiraVolume:
         raise ValueError(f"Cannot find BoundingBox in {path}")
     bbox = tuple(float(m.group(i)) for i in range(1, 7))
 
+    # Accept either `{ dtype Data }` (scalar / intensity) or `{ dtype Labels }`
+    # (label field). The field-name slot captures but we don't use its value.
     m = re.search(
-        r"Lattice\s*\{\s*(\w+)\s+Data\s*\}\s*@(\d+)(?:\(([A-Za-z]+)\s*,\s*(\d+)\))?",
+        r"Lattice\s*\{\s*(\w+)\s+(\w+)\s*\}\s*@(\d+)(?:\(([A-Za-z]+)\s*,\s*(\d+)\))?",
         header,
     )
     if not m:
         raise ValueError(f"Cannot parse Lattice descriptor in {path}")
     dtype_name = m.group(1)
-    encoding = m.group(3)
-    encoded_size = int(m.group(4)) if m.group(4) else None
+    encoding = m.group(4)
+    encoded_size = int(m.group(5)) if m.group(5) else None
 
     if dtype_name not in _DTYPE_MAP:
         raise NotImplementedError(f"Unsupported dtype: {dtype_name}")
@@ -200,6 +202,91 @@ def write_ushort_amira(
     )
 
     # AmiraMesh expects X-fastest, Y, Z; (Z, Y, X) C-contiguous already matches.
+    flat = np.ascontiguousarray(data).tobytes()
+
+    path = Path(path)
+    with open(path, "wb") as fh:
+        fh.write(header.encode("ascii"))
+        fh.write(flat)
+
+
+def write_label_amira(
+    path: str | Path,
+    data: np.ndarray,
+    bbox: tuple[float, float, float, float, float, float],
+    label_colors: np.ndarray,
+    label_names: list[str] | None = None,
+) -> None:
+    """Write a uint16 label volume as a real Avizo label field.
+
+    Adds a `Materials { ... }` block and uses `Lattice { ushort Labels } @1`
+    (not `Data`). Avizo then loads the file as HxUniformLabelField3, which:
+      - uses nearest-neighbour sampling by default (no trilinear fade between
+        adjacent labels when a bandpass colormap is applied);
+      - shows a Materials list in the Properties area with per-label
+        visibility toggles and per-label default colors;
+      - still supports bandpass inspection via MinMax [N-1, N+1].
+
+    `data`: (Z, Y, X) uint16. Values 0..K, 0 = background / Exterior.
+    `label_colors`: (K+1, 3) uint8. Index 0 is ignored (Exterior gets no
+        Color line, per Avizo convention); indices 1..K are per-label RGB.
+    `label_names`: optional list of K+1 material names. Defaults to
+        ["Exterior", "Neuron_0001", ..., f"Neuron_{K:04d}"].
+    """
+    if data.ndim != 3:
+        raise ValueError(f"data must be 3D (Z, Y, X); got shape {data.shape}")
+    if data.dtype != np.uint16:
+        raise ValueError(f"data must be uint16; got {data.dtype}")
+
+    K = int(data.max())
+    if label_colors.ndim != 2 or label_colors.shape[0] < K + 1 or label_colors.shape[1] != 3:
+        raise ValueError(
+            f"label_colors must be (>={K+1}, 3); got shape {label_colors.shape}"
+        )
+    if label_colors.dtype != np.uint8:
+        raise ValueError(f"label_colors must be uint8; got {label_colors.dtype}")
+    if label_names is None:
+        label_names = ["Exterior"] + [f"Neuron_{i:04d}" for i in range(1, K + 1)]
+    if len(label_names) < K + 1:
+        raise ValueError(f"label_names length {len(label_names)} < K+1 = {K+1}")
+
+    # Materials block.
+    lines = ["    Materials {"]
+    for i in range(K + 1):
+        name = label_names[i]
+        lines.append(f"        {name} {{")
+        if i == 0:
+            # Exterior: just Id, no Color (matches Avizo sample files).
+            lines.append(f"            Id {i}")
+        else:
+            r, g, b = (float(c) / 255.0 for c in label_colors[i])
+            lines.append(f"            Id {i},")
+            lines.append(f"            Color {r:.6f} {g:.6f} {b:.6f}")
+        lines.append("        }")
+    lines.append("    }")
+    materials_block = "\n".join(lines)
+
+    nz, ny, nx = data.shape
+    xmin, xmax, ymin, ymax, zmin, zmax = bbox
+
+    header = (
+        "# Avizo BINARY-LITTLE-ENDIAN 2.1\n"
+        "\n\n"
+        f"define Lattice {nx} {ny} {nz}\n"
+        "\n"
+        "Parameters {\n"
+        f"{materials_block}\n"
+        f'    Content "{nx}x{ny}x{nz} ushort, uniform coordinates",\n'
+        f"    BoundingBox {xmin} {xmax} {ymin} {ymax} {zmin} {zmax},\n"
+        '    CoordType "uniform"\n'
+        "}\n"
+        "\n"
+        "Lattice { ushort Labels } @1\n"
+        "\n"
+        "# Data section follows\n"
+        "@1\n"
+    )
+
     flat = np.ascontiguousarray(data).tobytes()
 
     path = Path(path)

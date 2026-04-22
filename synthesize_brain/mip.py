@@ -8,12 +8,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def _random_label_colors(num_labels: int, seed: int = 0) -> np.ndarray:
-    """Map label IDs 0..num_labels to RGB uint8; 0 = black."""
+def random_label_colors(num_labels: int, seed: int = 0) -> np.ndarray:
+    """Map label IDs 0..num_labels to RGB uint8; 0 = black.
+
+    Exposed (no underscore) so other modules — in particular the label-field
+    writer in `amira_io.py` — can share the same palette the MIP uses.
+    """
     rng = np.random.default_rng(seed)
     colors = rng.integers(64, 256, size=(num_labels + 1, 3), dtype=np.uint8)
     colors[0] = 0
     return colors
+
+
+# Backwards-compat alias (older code called it _random_label_colors).
+_random_label_colors = random_label_colors
 
 
 def write_mip(
