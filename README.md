@@ -1,5 +1,7 @@
 # SynthesizeBrain
 
+*English | [繁體中文](README.zh-TW.md)*
+
 Pack warped single-neuron volumes from the FlyCircuit dataset into paired
 **intensity + instance-label** volumes, intended as training data for
 single-neuron auto-segmentation on dense-staining brain images.
