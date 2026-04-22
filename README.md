@@ -7,7 +7,14 @@ single-neuron auto-segmentation on dense-staining brain images.
 ## What it produces
 
 For each run, a directory named
-`output/output_N{requested}_K{achieved}_s{seed}/` containing:
+`output/output_N{req}_K{c1}_R{total}_s{seed}/` containing:
+
+- `N` = neurons requested on the command line
+- `K` = accepted under C1 (greedy + repair survivors)
+- `R` = total rendered = K + expand-phase additions (R ≥ K; the expand
+  pass admits voxel-disjoint candidates even if they violate C1, for
+  denser training volumes)
+- `s` = resolved random seed (pass `--seed s` to reproduce)
 
 - `intensity.am` / `intensity.nii.gz` — uint16, voxel values = original warp
   intensities where a selected neuron lives, 0 elsewhere.
@@ -72,8 +79,9 @@ Defaults:
 - cache:    `cache/warp_index.npz` (plus `cache/candidate_scores.npz` after
             the first selection — this amortises the ~minute-long coverage-
             map + score pass across runs).
-- output:   `output/output_N{requested}_K{achieved}_s{seed}/` (name reveals
-            the packing ceiling AND lets multiple randomized runs coexist)
+- output:   `output/output_N{req}_K{c1}_R{total}_s{seed}/` (reveals the
+            C1-satisfying packing size K, the total-rendered size R after
+            the expand pass, and lets randomized runs coexist)
 - canvas:   derived from the union of all 9987 per-neuron bboxes (989×646×337
             at 1-voxel spacing for the current dataset).
 
@@ -100,18 +108,18 @@ deterministic selection order.
 
 With the dataset in `Kaleido\warp\` (9987 FlyCircuit warps):
 
-| N requested | K achieved | notes |
-|------------:|-----------:|-------|
-| 10          | 10         | trivially satisfies C1 |
-| 50          | 50         | C1 OK |
-| 100         | 100        | C1 OK |
-| 500         | ~130–165   | varies per seed; voxel packing saturates |
+| N requested | K (under C1) | R (total) | notes |
+|------------:|-------------:|----------:|-------|
+| 10          | 10           | 10        | trivially satisfies C1 |
+| 50          | 50           | 50        | C1 OK |
+| 100         | 100          | 100       | C1 OK |
+| 500         | ~130–150     | ~135–160  | varies per seed; voxel packing saturates |
 
-Voxel-disjoint packing saturates around **K ≈ 150** — after that no
+Voxel-disjoint packing saturates around **R ≈ 140–160** — after that no
 remaining neuron fits without overlap. A random-seed run explores a
 different local optimum each time, so repeated runs at N=500 give
-different K values and different neuron subsets, which is the intended
-behaviour for generating many training datasets.
+different K/R values and different neuron subsets, which is the
+intended behaviour for generating many training datasets.
 
 ## Algorithm sketch
 

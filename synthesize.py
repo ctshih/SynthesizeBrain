@@ -53,9 +53,11 @@ def _run_one(
 
     Output directory naming: if `out_override` is given we respect it
     verbatim; otherwise we build
-    `{out_root}/output_N{requested}_K{achieved}_s{seed}/` after we know K,
-    so multiple randomized runs don't collide and the name is reproducible
-    (pass `--seed {seed}` to regenerate the exact set).
+    `{out_root}/output_N{req}_K{c1}_R{total}_s{seed}/` — where
+        N = neurons requested
+        K = neurons accepted under C1 (greedy + repair survivors)
+        R = total rendered (K + expand-phase additions; R >= K)
+    Pass `--seed {seed}` back to reproduce the exact neuron set.
     """
     canvas_dims = tuple(int(v) for v in cache["canvas_dims"])
     canvas_bbox = tuple(float(v) for v in cache["canvas_bbox"])
@@ -73,20 +75,21 @@ def _run_one(
     nz_int = int((intensity > 0).sum())
     nz_lbl = int((labels > 0).sum())
     assert nz_int == nz_lbl, f"intensity/label non-zero mismatch: {nz_int} vs {nz_lbl}"
-    K = len(sel.indices)
+    R = len(sel.indices)                                  # total rendered
+    K = int(sum(p != "expand" for p in sel.phases))       # under-C1 subset
     unique_labels = np.unique(labels)
-    assert len(unique_labels) == K + 1, f"unique labels {len(unique_labels)} != K+1={K+1}"
+    assert len(unique_labels) == R + 1, f"unique labels {len(unique_labels)} != R+1={R+1}"
 
     out_dir = (
         Path(out_override)
         if out_override is not None
-        else (out_root / f"output_N{N}_K{K}_s{sel.seed_used}")
+        else (out_root / f"output_N{N}_K{K}_R{R}_s{sel.seed_used}")
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Shared label palette: the AmiraMesh `Materials` block and the MIP PNG
     # use the same colors, so what you see in Avizo == what you see in mip.png.
-    label_palette = random_label_colors(K, seed=sel.seed_used)
+    label_palette = random_label_colors(R, seed=sel.seed_used)
 
     # Build per-label names that include the driver so Avizo's Materials panel
     # is self-describing ("VGlut_500740" instead of anonymous "Material3").
@@ -140,7 +143,7 @@ def _run_one(
     print(f"[synth] contacts: {n_pairs} touching pairs written in {t_contacts:.1f}s")
 
     print()
-    print(f"[synth] requested N={N}, got K={K}")
+    print(f"[synth] requested N={N}, kept under C1 K={K}, total rendered R={R}")
     print(f"[synth] C1 coverage: mean={sel.bbox_coverages.mean():.3f}, "
           f"min={sel.bbox_coverages.min():.3f}, "
           f"violators={int((sel.bbox_coverages < 0.5).sum())}")
@@ -152,7 +155,8 @@ def _run_one(
 
     return {
         "N_requested": N,
-        "N_achieved": K,
+        "K_under_c1": K,
+        "R_total": R,
         "out_dir": str(out_dir),
         "t_select": t_select,
         "t_compose": t_compose,
@@ -227,20 +231,20 @@ def cmd_sweep(args: argparse.Namespace) -> None:
         rows.append(stats)
 
     summary_path = args.out_root / "sweep_summary.tsv"
-    cols = ["N_requested", "N_achieved", "elapsed_s", "coverage_mean",
+    cols = ["N_requested", "K_under_c1", "R_total", "elapsed_s", "coverage_mean",
             "coverage_min", "coverage_violators", "total_nz_voxels", "out_dir"]
     with open(summary_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow(cols)
         for r in rows:
             w.writerow([
-                r["N_requested"], r["N_achieved"], r["elapsed_s"],
+                r["N_requested"], r["K_under_c1"], r["R_total"], r["elapsed_s"],
                 round(r["coverage_mean"], 3), round(r["coverage_min"], 3),
                 r["coverage_violators"], r["total_nz_voxels"], r["out_dir"],
             ])
     print(f"\n[sweep] summary written to {summary_path}")
     for r in rows:
-        print(f"  N={r['N_requested']:>4}: got {r['N_achieved']:>4}, "
+        print(f"  N={r['N_requested']:>4}: K={r['K_under_c1']:>4} R={r['R_total']:>4}, "
               f"elapsed {r['elapsed_s']:>6.1f}s, "
               f"coverage mean={r['coverage_mean']:.3f} min={r['coverage_min']:.3f} "
               f"viol={r['coverage_violators']}, "
