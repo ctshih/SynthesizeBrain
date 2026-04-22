@@ -49,6 +49,7 @@ def _run_one(
     seed: int | None,
     rand_sigma: float,
     noise_sigma: float,
+    noise_baseline: float,
     out_root: Path,
     out_override: Path | None = None,
 ) -> dict:
@@ -75,16 +76,9 @@ def _run_one(
     intensity, labels = compose(sel, canvas_dims)
     t_compose = time.perf_counter() - t0
 
-    # Gaussian noise on intensity only — labels stay crisp as the ground truth.
-    # Seed is derived from the selection seed so the whole run is reproducible.
-    if noise_sigma > 0:
-        t0 = time.perf_counter()
-        intensity = add_gaussian_noise(intensity, sigma=noise_sigma,
-                                       seed=(sel.seed_used ^ 0xA1D5_E9B7) & 0xFFFFFFFF)
-        t_noise = time.perf_counter() - t0
-        print(f"[synth] added Gaussian noise σ={noise_sigma} to intensity "
-              f"in {t_noise:.1f}s")
-
+    # Sanity checks on the pristine compose output, BEFORE noise fills the
+    # background — once noise is added `intensity > 0` no longer equals
+    # `labels > 0`, so these assertions belong here.
     nz_int = int((intensity > 0).sum())
     nz_lbl = int((labels > 0).sum())
     assert nz_int == nz_lbl, f"intensity/label non-zero mismatch: {nz_int} vs {nz_lbl}"
@@ -92,6 +86,20 @@ def _run_one(
     K = int(sum(p != "expand" for p in sel.phases))       # under-C1 subset
     unique_labels = np.unique(labels)
     assert len(unique_labels) == R + 1, f"unique labels {len(unique_labels)} != R+1={R+1}"
+
+    # Gaussian noise on intensity only — labels stay crisp as the ground truth.
+    # Seed is derived from the selection seed so the whole run is reproducible.
+    # baseline > 0 shifts the background so clipping at 0 doesn't fold the
+    # distribution; emulates a real camera's dark-current offset.
+    if noise_sigma > 0 or noise_baseline > 0:
+        t0 = time.perf_counter()
+        intensity = add_gaussian_noise(
+            intensity, sigma=noise_sigma, baseline=noise_baseline,
+            seed=(sel.seed_used ^ 0xA1D5_E9B7) & 0xFFFFFFFF,
+        )
+        t_noise = time.perf_counter() - t0
+        print(f"[synth] added Gaussian noise σ={noise_sigma}, baseline={noise_baseline} "
+              f"to intensity in {t_noise:.1f}s")
 
     out_dir = (
         Path(out_override)
@@ -198,6 +206,7 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         seed=args.seed,
         rand_sigma=args.rand_sigma,
         noise_sigma=args.noise_sigma,
+        noise_baseline=args.noise_baseline,
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
     )
@@ -227,9 +236,11 @@ def cmd_noise(args: argparse.Namespace) -> None:
     voxel_size = (vx, vy, vz)
 
     t0 = time.perf_counter()
-    noisy = add_gaussian_noise(intensity, sigma=args.sigma, seed=args.seed)
+    noisy = add_gaussian_noise(intensity, sigma=args.sigma,
+                               baseline=args.baseline, seed=args.seed)
     t_noise = time.perf_counter() - t0
-    print(f"[noise] applied σ={args.sigma} seed={args.seed} in {t_noise:.1f}s")
+    print(f"[noise] applied σ={args.sigma}, baseline={args.baseline}, "
+          f"seed={args.seed} in {t_noise:.1f}s")
 
     write_ushort_amira(intensity_path, noisy, canvas_bbox)
     write_nifti(out_dir / "intensity.nii.gz", noisy, canvas_bbox, voxel_size)
@@ -296,6 +307,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             seed=args.seed,
             rand_sigma=args.rand_sigma,
             noise_sigma=args.noise_sigma,
+            noise_baseline=args.noise_baseline,
             out_root=args.out_root,
         )
         stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
@@ -354,8 +366,12 @@ def main() -> None:
                             "(0 disables randomness; default 0.25).")
     p_syn.add_argument("--noise-sigma", type=float, default=50.0,
                        help="Gaussian noise stdev added to intensity.am "
-                            "(0 = pristine; default 50, reasonable for the "
-                            "0..4095 ushort range of FlyCircuit warps).")
+                            "(0 = pristine; default 50).")
+    p_syn.add_argument("--noise-baseline", type=float, default=100.0,
+                       help="Constant offset added to every voxel before noise, "
+                            "so the background distribution stays truly Gaussian "
+                            "(mean=baseline) instead of being folded at 0. "
+                            "Default 100 ~ sCMOS dark-current level.")
     p_syn.set_defaults(func=cmd_synthesize)
 
     p_ct = sub.add_parser("contacts",
@@ -378,6 +394,9 @@ def main() -> None:
                        help="Path to an output_N{...}_K{...}/ directory.")
     p_noi.add_argument("--sigma", type=float, default=50.0,
                        help="Noise stdev (default 50).")
+    p_noi.add_argument("--baseline", type=float, default=100.0,
+                       help="Constant offset (default 100; keeps background "
+                            "Gaussian instead of folded at 0).")
     p_noi.add_argument("--seed", type=int, default=0,
                        help="Noise RNG seed (default 0).")
     p_noi.set_defaults(func=cmd_noise)
@@ -390,6 +409,7 @@ def main() -> None:
     p_sw.add_argument("--seed", type=int, default=None)
     p_sw.add_argument("--rand-sigma", type=float, default=0.25)
     p_sw.add_argument("--noise-sigma", type=float, default=50.0)
+    p_sw.add_argument("--noise-baseline", type=float, default=100.0)
     p_sw.set_defaults(func=cmd_sweep)
 
     args = p.parse_args()
