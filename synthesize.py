@@ -22,6 +22,7 @@ from synthesize_brain.contacts import write_contacts_csv
 from synthesize_brain.index import build_index, load_index
 from synthesize_brain.mip import random_label_colors, write_mip
 from synthesize_brain.nifti_io import write_nifti
+from synthesize_brain.scan_video import write_scan_video
 from synthesize_brain.select import select
 
 
@@ -142,6 +143,13 @@ def _run_one(
     t_contacts = time.perf_counter() - t0
     print(f"[synth] contacts: {n_pairs} touching pairs written in {t_contacts:.1f}s")
 
+    # Per-label scan video — one frame per label, newest white, seen dim,
+    # with a "N=i" caption. Handy for quickly eyeballing each label.
+    t0 = time.perf_counter()
+    write_scan_video(labels, out_dir / "scan_video.mp4", verbose=False)
+    t_video = time.perf_counter() - t0
+    print(f"[synth] scan_video.mp4 written in {t_video:.1f}s")
+
     print()
     print(f"[synth] requested N={N}, kept under C1 K={K}, total rendered R={R}")
     print(f"[synth] C1 coverage: mean={sel.bbox_coverages.mean():.3f}, "
@@ -180,6 +188,19 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
     )
+
+
+def cmd_video(args: argparse.Namespace) -> None:
+    """Regenerate scan_video.mp4 for an existing output directory."""
+    out_dir = Path(args.dir)
+    labels_path = out_dir / "labels.am"
+    if not labels_path.exists():
+        raise FileNotFoundError(f"labels.am not found in {out_dir}")
+    labels = read_amira(labels_path).data
+    out_path = out_dir / "scan_video.mp4"
+    t0 = time.perf_counter()
+    write_scan_video(labels, out_path, fps=args.fps)
+    print(f"[video] wrote {out_path} in {time.perf_counter()-t0:.1f}s")
 
 
 def cmd_contacts(args: argparse.Namespace) -> None:
@@ -288,6 +309,14 @@ def main() -> None:
     p_ct.add_argument("--dir", type=Path, required=True,
                       help="Path to an output_N{...}_K{...}/ directory.")
     p_ct.set_defaults(func=cmd_contacts)
+
+    p_vid = sub.add_parser("video",
+                           help="Regenerate scan_video.mp4 for an existing output dir.")
+    p_vid.add_argument("--dir", type=Path, required=True,
+                       help="Path to an output_N{...}_K{...}/ directory.")
+    p_vid.add_argument("--fps", type=float, default=3.0,
+                       help="Frames per second (default: 3, ~0.33s per label).")
+    p_vid.set_defaults(func=cmd_video)
 
     p_sw = sub.add_parser("sweep", help="Run synthesize for several N values.")
     p_sw.add_argument("--ns", type=int, nargs="+", default=[10, 50, 100, 500])

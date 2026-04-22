@@ -3,4 +3,6 @@ scipy
 nibabel
 matplotlib
 Pillow
+imageio
+imageio-ffmpeg
 tqdm
