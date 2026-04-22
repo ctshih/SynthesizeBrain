@@ -6,15 +6,23 @@ single-neuron auto-segmentation on dense-staining brain images.
 
 ## What it produces
 
-For each chosen `N`, a directory under `output/output_N{requested}_K{achieved}/`
-containing (e.g. requesting N=500 and getting K=148 yields `output/output_N500_K148/`):
+For each run, a directory named
+`output/output_N{requested}_K{achieved}_s{seed}/` containing:
 
 - `intensity.am` / `intensity.nii.gz` — uint16, voxel values = original warp
   intensities where a selected neuron lives, 0 elsewhere.
 - `labels.am` / `labels.nii.gz` — uint16, per-voxel instance label ID (1..K),
   0 = background. Paired 1-to-1 with `intensity.*`.
-- `neuron_list.tsv` — `label_id, filename, driver, voxel_count,
-  bbox_coverage, origin_{ix,iy,iz}, lattice_{nx,ny,nz}`.
+- `neuron_list.tsv` — `label_id, filename, driver, phase, voxel_count,
+  bbox_coverage, origin_{ix,iy,iz}, lattice_{nx,ny,nz}`. The `phase` column
+  is `greedy` / `repair` / `expand` — see "Selection phases" below.
+- `contacts.csv` — pairwise F/E/V contact voxel counts between every pair of
+  neurons that touch at least once. Columns:
+  `neuron1, neuron2, N_F, N_E, N_V`.
+  - **F** = face-adjacent (share a full face of their unit voxel cubes)
+  - **E** = edge-adjacent only (share an edge but not a face)
+  - **V** = vertex-adjacent only (share a corner vertex but not an edge)
+  Non-touching pairs are omitted.
 - `mip.png` — three-axis MIP preview (intensity grey; labels random colors).
 
 ## Packing constraints
@@ -42,10 +50,19 @@ pip install -r requirements.txt
 # 1) One-time scan of the warp directory (cache per-neuron metadata).
 python synthesize.py index
 
-# 2) Synthesize one run at a given N.
-python synthesize.py synthesize --n 100
+# 2) Synthesize one run (defaults: N=500, random seed each time).
+python synthesize.py synthesize
 
-# 3) Sweep several N values, emit output/sweep_summary.tsv.
+# 3) Reproduce a specific run by passing its seed.
+python synthesize.py synthesize --seed 2454876261
+
+# 4) Generate N training datasets with different neuron sets (omit --seed).
+for i in 1 2 3 4 5; do python synthesize.py synthesize; done
+
+# 5) Recompute contacts.csv on an existing output dir.
+python synthesize.py contacts --dir output/output_N500_K148/
+
+# 6) Sweep several N values.
 python synthesize.py sweep --ns 10 50 100 500
 ```
 
@@ -55,26 +72,46 @@ Defaults:
 - cache:    `cache/warp_index.npz` (plus `cache/candidate_scores.npz` after
             the first selection — this amortises the ~minute-long coverage-
             map + score pass across runs).
-- output:   `output/output_N{requested}_K{achieved}/` (name reveals the
-            packing ceiling at a glance)
+- output:   `output/output_N{requested}_K{achieved}_s{seed}/` (name reveals
+            the packing ceiling AND lets multiple randomized runs coexist)
 - canvas:   derived from the union of all 9987 per-neuron bboxes (989×646×337
             at 1-voxel spacing for the current dataset).
 
+## Selection phases
+
+The selector works in three phases, recorded per-neuron in
+`neuron_list.tsv → phase`:
+
+1. **greedy** — decreasing-score pack until either N is reached or the
+   sorted candidate pool is exhausted. Respects C1 + C2 in the sense that
+   voxel-disjointness is enforced, but C1 is *not* checked yet.
+2. **repair** — validate C1 per-neuron; drop violators (free their voxels
+   and bbox contribution), refill their slots from the remaining pool.
+   Loops up to 5 rounds. Only neurons that satisfy C1 survive here.
+3. **expand** — once no more neurons can replace violators, make one final
+   sweep through what's left and admit any that still fit by voxel
+   disjointness alone, *ignoring* C1. These are bonus instances for
+   training richness; they do not contribute to C1 guarantees.
+
+Set `--rand-sigma 0` to disable the score noise and recover the purely
+deterministic selection order.
+
 ## Empirical packing ceiling
 
-With the dataset in `Kaleido\warp\` (9987 FlyCircuit warps) and seed=42:
+With the dataset in `Kaleido\warp\` (9987 FlyCircuit warps):
 
-| N requested | K achieved | elapsed | coverage mean / min |
-|------------:|-----------:|--------:|---------------------|
-| 10          | 10         | ~10 s   | 0.80 / 0.54 |
-| 50          | 50         | ~65 s   | 0.90 / 0.51 |
-| 100         | 100        | ~65 s   | 0.90 / 0.54 |
-| 500         | ~148       | ~80 s   | 0.86 / 0.00 (3 violators) |
+| N requested | K achieved | notes |
+|------------:|-----------:|-------|
+| 10          | 10         | trivially satisfies C1 |
+| 50          | 50         | C1 OK |
+| 100         | 100        | C1 OK |
+| 500         | ~130–165   | varies per seed; voxel packing saturates |
 
-The voxel-disjoint packing saturates around **K ≈ 148**: after that the
-greedy exhausts all 9987 candidates and the remaining ones all overlap
-with something already placed. If you need more, we'd have to relax a
-constraint — see `synthesize_brain/select.py` for levers.
+Voxel-disjoint packing saturates around **K ≈ 150** — after that no
+remaining neuron fits without overlap. A random-seed run explores a
+different local optimum each time, so repeated runs at N=500 give
+different K values and different neuron subsets, which is the intended
+behaviour for generating many training datasets.
 
 ## Algorithm sketch
 
@@ -95,7 +132,8 @@ constraint — see `synthesize_brain/select.py` for levers.
 - **Phase 3 — `synthesize_brain/compose.py`**: paste each accepted neuron's
   non-zero voxels into `intensity` and write its label ID into `labels`.
 - **Phase 4 — writers**: `amira_io.py` (raw AmiraMesh ushort),
-  `nifti_io.py` (.nii.gz via nibabel), `mip.py` (three-axis MIP PNG).
+  `nifti_io.py` (.nii.gz via nibabel), `mip.py` (three-axis MIP PNG),
+  `contacts.py` (pairwise F/E/V voxel-touch counts).
 
 ## Repo layout
 
@@ -104,10 +142,12 @@ synthesize.py                  # CLI entry point
 synthesize_brain/
 ├── amira_io.py                # AmiraMesh reader (from Kaleido) + ushort writer
 ├── compose.py                 # Phase 3
+├── contacts.py                # Pairwise F/E/V contact counts
 ├── index.py                   # Phase 1
 ├── mip.py                     # MIP preview
 ├── nifti_io.py                # NIfTI writer
 └── select.py                  # Phase 2
+check_saturation.py            # Diagnostic: is final K truly voxel-saturated?
 cache/                         # warp_index.npz, candidate_scores.npz
 output/                        # output_N{req}_K{ach}/, sweep_summary.tsv
 tasks/                         # todo.md, lessons.md

@@ -16,8 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
-from synthesize_brain.amira_io import write_ushort_amira
+from synthesize_brain.amira_io import read_amira, write_ushort_amira
 from synthesize_brain.compose import compose
+from synthesize_brain.contacts import write_contacts_csv
 from synthesize_brain.index import build_index, load_index
 from synthesize_brain.mip import write_mip
 from synthesize_brain.nifti_io import write_nifti
@@ -43,22 +44,26 @@ def _run_one(
     cache: dict,
     cache_dir: Path,
     warp_dir: Path,
-    seed: int,
+    seed: int | None,
+    rand_sigma: float,
     out_root: Path,
     out_override: Path | None = None,
 ) -> dict:
     """Run selection + synthesis for a single N. Returns a stats dict.
 
     Output directory naming: if `out_override` is given we respect it
-    verbatim; otherwise we build `{out_root}/output_N{requested}_K{achieved}/`
-    after we know K, so the name truthfully reports "requested 500, got 148".
+    verbatim; otherwise we build
+    `{out_root}/output_N{requested}_K{achieved}_s{seed}/` after we know K,
+    so multiple randomized runs don't collide and the name is reproducible
+    (pass `--seed {seed}` to regenerate the exact set).
     """
     canvas_dims = tuple(int(v) for v in cache["canvas_dims"])
     canvas_bbox = tuple(float(v) for v in cache["canvas_bbox"])
     voxel_size = tuple(float(v) for v in cache["voxel_size"])
 
     t0 = time.perf_counter()
-    sel = select(cache=cache, N=N, warp_dir=warp_dir, cache_dir=cache_dir, seed=seed)
+    sel = select(cache=cache, N=N, warp_dir=warp_dir, cache_dir=cache_dir,
+                 seed=seed, rand_sigma=rand_sigma)
     t_select = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -72,7 +77,11 @@ def _run_one(
     unique_labels = np.unique(labels)
     assert len(unique_labels) == K + 1, f"unique labels {len(unique_labels)} != K+1={K+1}"
 
-    out_dir = Path(out_override) if out_override is not None else (out_root / f"output_N{N}_K{K}")
+    out_dir = (
+        Path(out_override)
+        if out_override is not None
+        else (out_root / f"output_N{N}_K{K}_s{sel.seed_used}")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
@@ -80,21 +89,25 @@ def _run_one(
     write_ushort_amira(out_dir / "labels.am", labels, canvas_bbox)
     write_nifti(out_dir / "intensity.nii.gz", intensity, canvas_bbox, voxel_size)
     write_nifti(out_dir / "labels.nii.gz", labels, canvas_bbox, voxel_size)
-    write_mip(out_dir / "mip.png", intensity, labels, seed=seed)
+    write_mip(out_dir / "mip.png", intensity, labels, seed=sel.seed_used)
     t_write = time.perf_counter() - t0
 
     tsv_path = out_dir / "neuron_list.tsv"
+    label_to_name: dict[int, str] = {}
     with open(tsv_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
-        w.writerow(["label_id", "filename", "driver", "voxel_count",
+        w.writerow(["label_id", "filename", "driver", "phase", "voxel_count",
                     "bbox_coverage", "origin_ix", "origin_iy", "origin_iz",
                     "lattice_nx", "lattice_ny", "lattice_nz"])
         for label_id, idx in enumerate(sel.indices, start=1):
             i = int(idx)
+            fname = str(cache["filenames"][i])
+            label_to_name[label_id] = fname
             w.writerow([
                 label_id,
-                str(cache["filenames"][i]),
+                fname,
                 str(cache["drivers"][i]),
+                str(sel.phases[label_id - 1]),
                 int(cache["nnz"][i]),
                 f"{float(sel.bbox_coverages[label_id-1]):.4f}",
                 int(cache["origin_ix"][i]),
@@ -104,6 +117,12 @@ def _run_one(
                 int(cache["dims"][i, 1]),
                 int(cache["dims"][i, 2]),
             ])
+
+    # Pairwise F/E/V contact statistics.
+    t0 = time.perf_counter()
+    n_pairs = write_contacts_csv(out_dir / "contacts.csv", labels, label_to_name)
+    t_contacts = time.perf_counter() - t0
+    print(f"[synth] contacts: {n_pairs} touching pairs written in {t_contacts:.1f}s")
 
     print()
     print(f"[synth] requested N={N}, got K={K}")
@@ -138,9 +157,38 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         cache_dir=args.cache.parent,
         warp_dir=args.warp_dir,
         seed=args.seed,
+        rand_sigma=args.rand_sigma,
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
     )
+
+
+def cmd_contacts(args: argparse.Namespace) -> None:
+    """Recompute contacts.csv on an existing output dir.
+
+    Useful for applying contact analysis to volumes synthesized before this
+    feature existed, or tweaking output format without re-running selection.
+    """
+    out_dir = Path(args.dir)
+    labels_path = out_dir / "labels.am"
+    tsv_path = out_dir / "neuron_list.tsv"
+    if not labels_path.exists() or not tsv_path.exists():
+        raise FileNotFoundError(f"need labels.am and neuron_list.tsv in {out_dir}")
+
+    labels = read_amira(labels_path).data  # (Z, Y, X) uint16
+    label_to_name: dict[int, str] = {}
+    with open(tsv_path) as fh:
+        r = csv.reader(fh, delimiter="\t")
+        header = next(r)
+        i_id = header.index("label_id")
+        i_fn = header.index("filename")
+        for row in r:
+            label_to_name[int(row[i_id])] = row[i_fn]
+
+    t0 = time.perf_counter()
+    n = write_contacts_csv(out_dir / "contacts.csv", labels, label_to_name)
+    print(f"[contacts] wrote {n} pairs to {out_dir/'contacts.csv'} "
+          f"in {time.perf_counter()-t0:.1f}s")
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
@@ -157,6 +205,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             cache_dir=args.cache.parent,
             warp_dir=args.warp_dir,
             seed=args.seed,
+            rand_sigma=args.rand_sigma,
             out_root=args.out_root,
         )
         stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
@@ -197,21 +246,37 @@ def main() -> None:
     p_idx.set_defaults(func=cmd_index)
 
     p_syn = sub.add_parser("synthesize", help="Compose a single N-neuron volume pair.")
-    p_syn.add_argument("--n", type=int, required=True)
+    p_syn.add_argument("--n", type=int, default=500,
+                       help="Requested neuron count (default: 500). "
+                            "The actual K may be smaller when packing saturates.")
     p_syn.add_argument("--out", type=Path, default=None,
                        help="Override the auto-named output dir (default: "
-                            "output/output_N{requested}_K{achieved}/).")
+                            "output/output_N{req}_K{ach}_s{seed}/).")
     p_syn.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     p_syn.add_argument("--warp-dir", type=Path, default=DEFAULT_WARP_DIR)
-    p_syn.add_argument("--seed", type=int, default=42)
+    p_syn.add_argument("--seed", type=int, default=None,
+                       help="Random seed. If omitted, a fresh seed is drawn "
+                            "so repeated runs yield different neuron sets "
+                            "(the resolved seed is logged and embedded in "
+                            "the output dir name for reproducibility).")
+    p_syn.add_argument("--rand-sigma", type=float, default=0.25,
+                       help="Score-noise stdev as a fraction of score std "
+                            "(0 disables randomness; default 0.25).")
     p_syn.set_defaults(func=cmd_synthesize)
+
+    p_ct = sub.add_parser("contacts",
+                          help="Compute pairwise F/E/V contacts on an existing output dir.")
+    p_ct.add_argument("--dir", type=Path, required=True,
+                      help="Path to an output_N{...}_K{...}/ directory.")
+    p_ct.set_defaults(func=cmd_contacts)
 
     p_sw = sub.add_parser("sweep", help="Run synthesize for several N values.")
     p_sw.add_argument("--ns", type=int, nargs="+", default=[10, 50, 100, 500])
     p_sw.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     p_sw.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
     p_sw.add_argument("--warp-dir", type=Path, default=DEFAULT_WARP_DIR)
-    p_sw.add_argument("--seed", type=int, default=42)
+    p_sw.add_argument("--seed", type=int, default=None)
+    p_sw.add_argument("--rand-sigma", type=float, default=0.25)
     p_sw.set_defaults(func=cmd_sweep)
 
     args = p.parse_args()

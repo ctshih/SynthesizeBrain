@@ -43,12 +43,14 @@ _SCORE_CACHE_FILENAME = "candidate_scores.npz"
 
 @dataclass
 class SelectionResult:
-    indices: np.ndarray           # (K,) indices into the cache, K <= N requested
+    indices: np.ndarray           # (K,) indices into the cache
     bbox_coverages: np.ndarray    # (K,) per-neuron C1 coverage ratios
+    phases: np.ndarray            # (K,) str — "greedy" / "repair" / "expand"
     occupied_mask: np.ndarray     # (Z, Y, X) bool — union of selected voxel masks
     volumes: list[tuple[int, np.ndarray, tuple[int, int, int]]]
     # volumes: list of (cache_idx, nonzero_values_uint16, (zs, ys, xs)_canvas_indices)
     # stored here so compose.py can paste them without re-reading from disk
+    seed_used: int = 0            # the actual seed value used (for reproducibility)
 
 
 def _tight_bbox_slices(idx: int, cache: dict) -> tuple[slice, slice, slice]:
@@ -230,34 +232,63 @@ def select(
     N: int,
     warp_dir: Path,
     cache_dir: Path,
-    seed: int = 42,
+    seed: int | None = None,
+    rand_sigma: float = 0.25,
     coverage_threshold: float = 0.5,
     max_repair_rounds: int = 5,
     max_candidates_per_round: int | None = None,
+    expand_after_repair: bool = True,
     verbose: bool = True,
 ) -> SelectionResult:
-    """Run Phase 2 selection and return up to N neurons satisfying both constraints."""
+    """Run Phase 2 selection and return up to N neurons satisfying the packing constraints.
+
+    `seed`: if None, draws a fresh entropy-based seed and logs it so the run
+        can be reproduced by passing the same value later.
+    `rand_sigma`: Gaussian noise stdev applied to candidate scores, expressed
+        as a fraction of the score distribution's stdev (0 disables randomness
+        and gives deterministic "densest first" ordering).
+    `expand_after_repair`: after the C1-aware repair loop, iterate remaining
+        candidates once more and admit any that don't voxel-overlap, EVEN IF
+        they violate C1. Gives the richest packing — paired (intensity, label)
+        volumes for segmentation benefit from more neurons regardless of C1.
+    """
     canvas_dims = tuple(int(v) for v in cache["canvas_dims"])  # (X, Y, Z) declared
     # canvas_dims from cache is (nx, ny, nz); arrays here are (z, y, x).
     nx_c, ny_c, nz_c = canvas_dims
     canvas_zyx = (nz_c, ny_c, nx_c)
 
+    # Resolve seed: draw fresh entropy if None so each unseeded run is different.
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy & 0xFFFFFFFF)
+    rng = np.random.default_rng(seed)
+
     if verbose:
-        print(f"[select] canvas (z,y,x) = {canvas_zyx}, requesting N={N}")
+        print(f"[select] canvas (z,y,x) = {canvas_zyx}, requesting N={N}, seed={seed}")
 
     # A + B. Coverage-map + per-neuron scoring. Cache across runs.
     scores = _compute_or_load_scores(cache, canvas_dims, cache_dir, verbose=verbose)
 
-    # Sort candidates by descending score. Break ties by nnz (smaller first —
-    # smaller neurons pack more easily and leave more room for others).
+    # Apply seed-driven Gaussian noise so each run picks a different set while
+    # staying biased toward dense regions. sigma = rand_sigma × std(scores).
+    if rand_sigma > 0:
+        noise_std = rand_sigma * float(scores.std())
+        perturbed = scores + rng.normal(0.0, noise_std, size=scores.shape).astype(np.float32)
+        if verbose:
+            print(f"[select] score noise σ = {noise_std:.3f} "
+                  f"(rand_sigma={rand_sigma} × score std {scores.std():.3f})")
+    else:
+        perturbed = scores
+
+    # Sort candidates by descending perturbed score. Break ties by nnz.
     nnz = cache["nnz"]
-    order = np.lexsort((nnz, -scores))  # primary: -scores (desc), secondary: nnz (asc)
+    order = np.lexsort((nnz, -perturbed))
     if max_candidates_per_round is not None:
         order = order[:max_candidates_per_round]
 
     # C. Greedy fill.
     occupied = np.zeros(canvas_zyx, dtype=bool)
     selected: list[int] = []
+    phase_by_idx: dict[int, str] = {}
     volumes: dict[int, tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
 
     # Shared in-memory read cache: avoids re-decoding the same .am during
@@ -280,6 +311,7 @@ def select(
                 continue
             occupied[zs, ys, xs] = True
             selected.append(idx)
+            phase_by_idx[idx] = "greedy"
             volumes[idx] = (values, (zs, ys, xs))
             pbar.update(1)
     finally:
@@ -336,6 +368,7 @@ def select(
                 continue
             occupied[zs, ys, xs] = True
             selected.append(idx)
+            phase_by_idx[idx] = "repair"
             volumes[idx] = (values, (zs, ys, xs))
             _bbox_counter_add(counter, idx, cache)
             refilled += 1
@@ -347,15 +380,47 @@ def select(
         if refilled == 0:
             break
 
+    # E. Expand pass — voxel-only, no C1 check. Squeeze in any remaining
+    #    candidate that fits into the empty pockets left after repair. These
+    #    are bonus neurons; they boost packing density and training
+    #    richness but do NOT contribute to C1 satisfaction.
+    if expand_after_repair and len(selected) < N:
+        t_exp = time.perf_counter()
+        expand_added = 0
+        expand_tried = 0
+        gen2 = _prefetched_reads(remaining_order, cache, warp_dir, read_cache=read_cache)
+        try:
+            for idx, values, idx_tuple in gen2:
+                if len(selected) >= N:
+                    break
+                expand_tried += 1
+                if values is None:
+                    continue
+                zs, ys, xs = idx_tuple
+                if occupied[zs, ys, xs].any():
+                    continue
+                occupied[zs, ys, xs] = True
+                selected.append(idx)
+                phase_by_idx[idx] = "expand"
+                volumes[idx] = (values, (zs, ys, xs))
+                _bbox_counter_add(counter, idx, cache)
+                expand_added += 1
+        finally:
+            gen2.close()
+        if verbose:
+            print(f"[select] expand pass: +{expand_added} (tried {expand_tried}) in "
+                  f"{time.perf_counter()-t_exp:.1f}s, K = {len(selected)}")
+
     # Final C1 check on the settled set.
     ratios = _coverage_ratios(selected, counter, cache)
-    # Some neurons may still violate C1 if we can't find replacements; we keep
-    # them and report honestly. Caller can decide what to do.
 
     vol_list = [(i, volumes[i][0], volumes[i][1]) for i in selected]
+    phases = np.array([phase_by_idx[i] for i in selected], dtype=object)
     return SelectionResult(
         indices=np.array(selected, dtype=np.int64),
         bbox_coverages=ratios,
+        phases=phases,
         occupied_mask=occupied,
         volumes=vol_list,
+        seed_used=int(seed),
     )
