@@ -1,10 +1,14 @@
 """SynthesizeBrain CLI.
 
 Subcommands:
-  index       Scan the warp directory, build per-neuron cache. Run once.
+  init        Scan the warp directory, build per-neuron cache. Run once
+              before anything else (or whenever the source data changes).
   synthesize  Pick N neurons under the packing constraints and emit
               intensity + label volumes (.am + .nii.gz) plus neuron_list.tsv.
   sweep       Run synthesize for several N values in one go.
+  contacts    Recompute pairwise F/E/V contacts on an existing output dir.
+  video       Regenerate scan_video.mp4 on an existing output dir.
+  noise       Add / re-roll Gaussian noise on an existing intensity.am.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ DEFAULT_CACHE = Path("cache/warp_index.npz")
 DEFAULT_OUT_ROOT = Path("output")
 
 
-def cmd_index(args: argparse.Namespace) -> None:
+def cmd_init(args: argparse.Namespace) -> None:
     build_index(
         warp_dir=args.warp_dir,
         cache_path=args.cache,
@@ -341,14 +345,14 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="synthesize", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_idx = sub.add_parser("index", help="Build the warp-file index cache.")
+    p_idx = sub.add_parser("init", help="Build the warp-file metadata cache. Run once.")
     p_idx.add_argument("--warp-dir", type=Path, default=DEFAULT_WARP_DIR)
     p_idx.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     p_idx.add_argument("--workers", type=int, default=None,
                        help="Parallel workers (default: cpu-1).")
     p_idx.add_argument("--limit", type=int, default=None,
                        help="Scan only the first N files (for smoke tests).")
-    p_idx.set_defaults(func=cmd_index)
+    p_idx.set_defaults(func=cmd_init)
 
     p_syn = sub.add_parser("synthesize", help="Compose a single N-neuron volume pair.")
     p_syn.add_argument("--n", type=int, default=500,
