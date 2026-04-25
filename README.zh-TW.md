@@ -52,7 +52,8 @@ python synthesize.py synthesize
 python synthesize.py synthesize --seed 2454876261
 
 # 迴圈產出多組訓練樣本（每次不同 neuron 組合）
-for i in 1 2 3 4 5; do python synthesize.py synthesize; done
+for i in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
+1..5 | ForEach-Object { python synthesize.py synthesize }                # PowerShell
 
 # 一次掃多個 N（測天花板）
 python synthesize.py sweep --ns 10 50 100 500

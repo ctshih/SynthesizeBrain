@@ -52,7 +52,8 @@ python synthesize.py synthesize
 python synthesize.py synthesize --seed 2454876261
 
 # Generate many training datasets in a loop (different neuron set each time).
-for i in 1 2 3 4 5; do python synthesize.py synthesize; done
+for i in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
+1..5 | ForEach-Object { python synthesize.py synthesize }                # PowerShell
 
 # Sweep several N values in one go (e.g. for ceiling testing).
 python synthesize.py sweep --ns 10 50 100 500
