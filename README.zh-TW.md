@@ -52,8 +52,9 @@ python synthesize.py synthesize
 python synthesize.py synthesize --seed 2454876261
 
 # 迴圈產出多組訓練樣本（每次不同 neuron 組合）
-for i in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
+for _ in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
 1..5 | ForEach-Object { python synthesize.py synthesize }                # PowerShell
+for /L %i in (1,1,5) do python synthesize.py synthesize                  # Windows cmd.exe
 
 # 一次掃多個 N（測天花板）
 python synthesize.py sweep --ns 10 50 100 500
@@ -92,6 +93,8 @@ python synthesize.py noise --dir output/output_N500_K148_R150_s.../ \
 | `--cache` | `cache/warp_index.npz` | 讀取快取 |
 | `--warp-dir` | 同 init | warp `.am` 檔資料夾 |
 | `--rand-sigma` | `0.25` | Score 雜訊（fraction of score std）。0 = 完全 deterministic |
+| `--coverage-threshold` | `0.5` | C1 bbox 覆蓋率閾值 [0, 1]。值越低 → 包裝越鬆、repair 砍越少。`0` 等於關掉 C1 |
+| `--score-mode` | `density` | Greedy 排序。`density` = 從最密腦區優先（預設，視覺上聚集）。`small-first` = 從最瘦 neuron 優先（多 ~30% 顆，見「最大化 K」）。`hybrid` = score / nnz |
 | `--noise-sigma` | `50` | intensity.am 加的 Gaussian 雜訊 σ（0 = 不加） |
 | `--noise-baseline` | `100` | 加 noise 前的基線偏移，讓背景仍是純 Gaussian（~ sCMOS dark-current level） |
 | `--no-video` | 關 | 略過 `scan_video.mp4` 產生（省 ~50 秒/次，批次跑用） |
@@ -102,7 +105,7 @@ python synthesize.py noise --dir output/output_N500_K148_R150_s.../ \
 |---|---|---|
 | `--ns` | `10 50 100 500` | 要跑的 N 列表 |
 | `--out-root` | `output` | 各 run 輸出的根目錄 |
-| `--cache` / `--warp-dir` / `--seed` / `--rand-sigma` / `--noise-sigma` / `--noise-baseline` | 同 synthesize | |
+| `--cache` / `--warp-dir` / `--seed` / `--rand-sigma` / `--coverage-threshold` / `--score-mode` / `--noise-sigma` / `--noise-baseline` | 同 synthesize | |
 
 #### `contacts` — 重算 F/E/V 接觸統計
 
@@ -150,7 +153,7 @@ python synthesize.py noise --dir output/output_N500_K148_R150_s.../ \
 
 選出的 `N` 顆神經元必須滿足：
 
-1. **BBox 覆蓋率 ≥ 50 %**（C1）：對每顆 neuron *n*，`|bbox(n) ∩ ⋃_{m≠n} bbox(m)| / |bbox(n)| ≥ 0.5`（voxel 計數一次）。防止空間分散，不然 segmentation 太簡單。
+1. **BBox 覆蓋率 ≥ 閾值**（C1）：對每顆 neuron *n*，`|bbox(n) ∩ ⋃_{m≠n} bbox(m)| / |bbox(n)| ≥ T`，預設 `T = 0.5`，可用 `--coverage-threshold` 調整（voxel 計數一次）。防止空間分散，不然 segmentation 太簡單。設 `T = 0` 等於關閉 C1（只剩 C2 voxel 互斥要過）。
 2. **Voxel 層級互斥**（C2）：入選 neuron 的非零 voxel 兩兩不重疊（可以觸碰但不可重疊）。真實密集腦組織不會重疊；warp 自不同個體會。
 
 同一次合成允許混多個 driver（Tdc2 / Trh / VGlut / fru）。
@@ -162,6 +165,25 @@ python synthesize.py noise --dir output/output_N500_K148_R150_s.../ \
 1. **greedy** — 依 score 由高至低試裝，到 N 或 candidate 用完為止。只檢查 voxel 互斥（C2），**還不管 C1**。
 2. **repair** — 驗證每顆 neuron 的 C1 覆蓋率；違規者丟掉（釋放其 voxel 與 bbox 貢獻），從剩餘 pool 補進不違規的。最多 5 輪。此階段結束時，**留下的都滿足 C1**。
 3. **expand** — 在沒有更多候選能替換 violator 時，對剩餘 candidate 再掃一次，凡是 voxel 仍能塞進去的就收 — **忽略 C1**。這些是 training 密度的 bonus，不在 C1 保障內。
+
+## 最大化 K（盡可能塞多顆 neuron）
+
+預設配置下 K ≈ 140–180 飽和，原因是 greedy 階段**優先放大顆神經元**，把後續小顆的空間堵死。想塞更多用：
+
+```bash
+python synthesize.py synthesize --n 500 --score-mode small-first --coverage-threshold 0
+```
+
+`small-first` 把 greedy 改成 nnz 由小到大排序 — 瘦神經元先擠進大顆留下的縫隙。配合 `--coverage-threshold 0`（關掉 C1 repair 的 churn）通常可以**多 ~30% 顆**，代價是平均 bbox 覆蓋率稍降（如 mean 0.86 → 0.83）。在 28 620 顆的 dataset 上同 seed 對比：
+
+| `--score-mode` | `--coverage-threshold` | K | R | 平均覆蓋率 |
+|---|---|---|---|---|
+| `density`（預設） | `0.5` | 147 | 148 | 0.860 |
+| `small-first` | `0.5` | 191 | 195 | 0.838 |
+| `small-first` | `0.0` | **193** | 193 | 0.832 |
+| `hybrid` | `0.5` | 169 | 173 | 0.844 |
+
+Trade-off：neuron 數變多，但**總非零 voxel 量變少**（小神經元每顆 voxel 少）、低覆蓋率的 long tail 變長（如 7 顆 < 0.5，相對於 `density` 的 1 顆）。若訓練重點在 instance 多樣性，選 `small-first`；要逼近真實密集染色外觀，選 `density`。
 
 ## intensity.am 的 Gaussian 雜訊
 

@@ -52,8 +52,9 @@ python synthesize.py synthesize
 python synthesize.py synthesize --seed 2454876261
 
 # Generate many training datasets in a loop (different neuron set each time).
-for i in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
+for _ in 1 2 3 4 5; do python synthesize.py synthesize; done             # bash / git-bash
 1..5 | ForEach-Object { python synthesize.py synthesize }                # PowerShell
+for /L %i in (1,1,5) do python synthesize.py synthesize                  # Windows cmd.exe
 
 # Sweep several N values in one go (e.g. for ceiling testing).
 python synthesize.py sweep --ns 10 50 100 500
@@ -92,6 +93,8 @@ Typical workflow is just `init` once + `synthesize` repeatedly. The other subcom
 | `--cache` | `cache/warp_index.npz` | Read-from cache |
 | `--warp-dir` | same as init | Directory of warp `.am` files |
 | `--rand-sigma` | `0.25` | Score-noise stdev as a fraction of score std (0 = fully deterministic) |
+| `--coverage-threshold` | `0.5` | C1 bbox-coverage threshold in [0, 1]. Lower = looser packing, more neurons survive repair. `0` disables C1 entirely |
+| `--score-mode` | `density` | Greedy ordering. `density` = densest brain regions first (default; visually clustered). `small-first` = thinnest neurons first (~30% more neurons; see "Maximizing K"). `hybrid` = score / nnz |
 | `--noise-sigma` | `50` | Gaussian noise stdev added to intensity.am (0 = pristine) |
 | `--noise-baseline` | `100` | Constant offset added before noise so the background stays a clean Gaussian (~ sCMOS dark-current level) |
 | `--no-video` | off | Skip `scan_video.mp4` generation (saves ~50 s/run, useful in batch mode) |
@@ -102,7 +105,7 @@ Typical workflow is just `init` once + `synthesize` repeatedly. The other subcom
 |---|---|---|
 | `--ns` | `10 50 100 500` | List of N values to run |
 | `--out-root` | `output` | Root directory for per-N outputs |
-| `--cache` / `--warp-dir` / `--seed` / `--rand-sigma` / `--noise-sigma` / `--noise-baseline` | same as synthesize | |
+| `--cache` / `--warp-dir` / `--seed` / `--rand-sigma` / `--coverage-threshold` / `--score-mode` / `--noise-sigma` / `--noise-baseline` | same as synthesize | |
 
 #### `contacts` — recompute F/E/V contact stats
 
@@ -150,7 +153,7 @@ Directory contents:
 
 The selected `N` neurons satisfy:
 
-1. **BBox coverage ≥ 50%** (C1). For each selected neuron *n*, `|bbox(n) ∩ ⋃_{m≠n} bbox(m)| / |bbox(n)| ≥ 0.5` (voxels counted once). Prevents trivially-separated training cases.
+1. **BBox coverage ≥ threshold** (C1). For each selected neuron *n*, `|bbox(n) ∩ ⋃_{m≠n} bbox(m)| / |bbox(n)| ≥ T`, where `T` defaults to `0.5` and is configurable via `--coverage-threshold` (voxels counted once). Prevents trivially-separated training cases. Set `T=0` to disable C1 (everything just needs C2).
 2. **Voxel-level disjointness** (C2). Selected neurons' non-zero voxels are pairwise disjoint (touching is fine, overlap is not). Real dense tissue doesn't overlap; warps from different flies can.
 
 A single synthesis can mix drivers (Tdc2 / Trh / VGlut / fru).
@@ -162,6 +165,25 @@ The selector runs in three phases, and each neuron's phase is recorded in `neuro
 1. **greedy** — pack candidates in decreasing-score order until N is reached or the candidate pool is exhausted. Enforces voxel-disjointness (C2); does *not* yet check C1.
 2. **repair** — validate C1 per neuron; drop violators (free their voxels and bbox contribution), refill from the remaining pool. Loops up to 5 rounds. Survivors all satisfy C1 by the end.
 3. **expand** — once no more neurons can replace violators, sweep the remaining pool once more and admit any that still fit by voxel disjointness alone, *ignoring* C1. These are training-density bonuses; they don't carry the C1 guarantee.
+
+## Maximizing K (when you want as many neurons as possible)
+
+The default packing saturates around K ≈ 140–180 because the greedy phase places **dense, voxel-heavy neurons first**, blocking thinner ones from fitting later. To pack more neurons:
+
+```bash
+python synthesize.py synthesize --n 500 --score-mode small-first --coverage-threshold 0
+```
+
+`small-first` orders the greedy phase by neuron size ascending — thin neurons fit into the canvas gaps left by fat ones. Combined with `--coverage-threshold 0` (disable C1 repair churn), this typically yields **~30% more neurons** at the cost of a slightly lower mean bbox-coverage (e.g. mean 0.86 → 0.83). Same-seed comparison on the 28 620-neuron dataset:
+
+| `--score-mode` | `--coverage-threshold` | K | R | mean coverage |
+|---|---|---|---|---|
+| `density` (default) | `0.5` | 147 | 148 | 0.860 |
+| `small-first` | `0.5` | 191 | 195 | 0.838 |
+| `small-first` | `0.0` | **193** | 193 | 0.832 |
+| `hybrid` | `0.5` | 169 | 173 | 0.844 |
+
+The trade-off: more neurons, but lower **total non-zero voxel count** (small neurons = less mass each) and a longer tail of low-coverage neurons (e.g. 7 neurons below 0.5, vs 1 in `density`). Pick `small-first` if your training cares about instance diversity, `density` if it cares about realistic dense-staining appearance.
 
 ## Gaussian noise on intensity.am
 

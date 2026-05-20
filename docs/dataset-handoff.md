@@ -64,7 +64,7 @@ output/output_N{requested}_K{c1_count}_R{total_count}_s{seed}/
 | `R=156` | 總 instance 數量（K + expand 階段加碼，可能違反 C1）|
 | `s=91136998` | 隨機 seed（可重現）|
 
-R - K = expand 階段加碼的 neuron 數量。這些 neuron 在 `neuron_list.tsv` 的 `phase` 欄會標 `expand`，且 `bbox_coverage < 0.5`。
+R - K = expand 階段加碼的 neuron 數量。這些 neuron 在 `neuron_list.tsv` 的 `phase` 欄會標 `expand`，且 `bbox_coverage` 會低於 C1 閾值（預設 0.5；可用 `--coverage-threshold` 調整）。
 
 ---
 
@@ -112,7 +112,7 @@ print((labels == 47).sum())                  # voxels of instance 47
 | `driver` | str | GAL4 driver（`Tdc2` / `Trh` / `VGlut` / `fru`）|
 | `phase` | str | `greedy` / `repair` / `expand` — 決定 C1 是否保障 |
 | `voxel_count` | int | 該 instance 的非零 voxel 數量 |
-| `bbox_coverage` | float | C1 覆蓋率 [0, 1]，phase=expand 可能 < 0.5 |
+| `bbox_coverage` | float | C1 覆蓋率 [0, 1]，phase=expand 可能低於 C1 閾值（預設 0.5）|
 | `origin_ix/iy/iz` | int | 該 instance 的 bounding-box 起點（canvas voxel 座標）|
 | `lattice_nx/ny/nz` | int | 原始 warp 檔的 lattice 尺寸 |
 
@@ -268,6 +268,6 @@ Instance ID 在不同 run 之間不對應 (用 neuron_list.tsv 的 filename 跨 
 最重要的提醒:
   * intensity 背景非零 (有 noise) — 不要用 thresholding
   * 一律用 labels 當 ground truth
-  * phase=expand 的 instance 不保障 C1 (bbox_coverage < 0.5)
+  * phase=expand 的 instance 不保障 C1 (bbox_coverage 低於 --coverage-threshold；預設 0.5)
   * 不同 run 之間的 instance ID 不對應 — 用 filename 對齊
 ```

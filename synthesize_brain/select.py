@@ -235,6 +235,7 @@ def select(
     seed: int | None = None,
     rand_sigma: float = 0.25,
     coverage_threshold: float = 0.5,
+    score_mode: str = "density",
     max_repair_rounds: int = 5,
     max_candidates_per_round: int | None = None,
     expand_after_repair: bool = True,
@@ -247,6 +248,12 @@ def select(
     `rand_sigma`: Gaussian noise stdev applied to candidate scores, expressed
         as a fraction of the score distribution's stdev (0 disables randomness
         and gives deterministic "densest first" ordering).
+    `score_mode`:
+        - "density"     : sort by densest-first (default; biases toward central
+                          brain regions, packing fewer but more clustered neurons).
+        - "small-first" : sort by smallest-nnz first (packs more neurons by
+                          using up canvas with thin neurons before fat ones).
+        - "hybrid"      : sort by `score / nnz` (per-voxel density), a mix.
     `expand_after_repair`: after the C1-aware repair loop, iterate remaining
         candidates once more and admit any that don't voxel-overlap, EVEN IF
         they violate C1. Gives the richest packing — paired (intensity, label)
@@ -279,9 +286,24 @@ def select(
     else:
         perturbed = scores
 
-    # Sort candidates by descending perturbed score. Break ties by nnz.
-    nnz = cache["nnz"]
-    order = np.lexsort((nnz, -perturbed))
+    # Sort candidates by the chosen score mode.
+    # np.lexsort: LAST key is the primary sort key. Earlier keys break ties.
+    nnz = cache["nnz"].astype(np.int64)
+    if score_mode == "density":
+        # Primary: score desc; tiebreak: nnz asc.
+        order = np.lexsort((nnz, -perturbed))
+    elif score_mode == "small-first":
+        # Primary: nnz asc; tiebreak: score desc. Maximizes K by packing
+        # thin neurons first so the canvas isn't blocked by big ones.
+        order = np.lexsort((-perturbed, nnz))
+    elif score_mode == "hybrid":
+        # Per-voxel score density: rewards small AND well-positioned neurons.
+        util = perturbed / np.maximum(nnz.astype(np.float32), 1.0)
+        order = np.lexsort((nnz, -util))
+    else:
+        raise ValueError(f"unknown score_mode: {score_mode!r}")
+    if verbose:
+        print(f"[select] score_mode = {score_mode}")
     if max_candidates_per_round is not None:
         order = order[:max_candidates_per_round]
 

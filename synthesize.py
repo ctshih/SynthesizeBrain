@@ -57,6 +57,8 @@ def _run_one(
     out_root: Path,
     out_override: Path | None = None,
     make_video: bool = True,
+    coverage_threshold: float = 0.5,
+    score_mode: str = "density",
 ) -> dict:
     """Run selection + synthesis for a single N. Returns a stats dict.
 
@@ -74,7 +76,9 @@ def _run_one(
 
     t0 = time.perf_counter()
     sel = select(cache=cache, N=N, warp_dir=warp_dir, cache_dir=cache_dir,
-                 seed=seed, rand_sigma=rand_sigma)
+                 seed=seed, rand_sigma=rand_sigma,
+                 coverage_threshold=coverage_threshold,
+                 score_mode=score_mode)
     t_select = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -178,9 +182,10 @@ def _run_one(
 
     print()
     print(f"[synth] requested N={N}, kept under C1 K={K}, total rendered R={R}")
-    print(f"[synth] C1 coverage: mean={sel.bbox_coverages.mean():.3f}, "
+    print(f"[synth] C1 coverage (threshold={coverage_threshold}): "
+          f"mean={sel.bbox_coverages.mean():.3f}, "
           f"min={sel.bbox_coverages.min():.3f}, "
-          f"violators={int((sel.bbox_coverages < 0.5).sum())}")
+          f"violators={int((sel.bbox_coverages < coverage_threshold).sum())}")
     print(f"[synth] non-zero voxels: {nz_int} "
           f"({100*nz_int/intensity.size:.2f}% of canvas)")
     print(f"[synth] timings: select={t_select:.1f}s, compose={t_compose:.1f}s, "
@@ -197,7 +202,7 @@ def _run_one(
         "t_write": t_write,
         "coverage_mean": float(sel.bbox_coverages.mean()),
         "coverage_min": float(sel.bbox_coverages.min()),
-        "coverage_violators": int((sel.bbox_coverages < 0.5).sum()),
+        "coverage_violators": int((sel.bbox_coverages < coverage_threshold).sum()),
         "total_nz_voxels": nz_int,
     }
 
@@ -216,6 +221,8 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         out_root=DEFAULT_OUT_ROOT,
         out_override=args.out,
         make_video=not args.no_video,
+        coverage_threshold=args.coverage_threshold,
+        score_mode=args.score_mode,
     )
 
 
@@ -316,6 +323,8 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             noise_sigma=args.noise_sigma,
             noise_baseline=args.noise_baseline,
             out_root=args.out_root,
+            coverage_threshold=args.coverage_threshold,
+            score_mode=args.score_mode,
         )
         stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
         rows.append(stats)
@@ -371,6 +380,20 @@ def main() -> None:
     p_syn.add_argument("--rand-sigma", type=float, default=0.25,
                        help="Score-noise stdev as a fraction of score std "
                             "(0 disables randomness; default 0.25).")
+    p_syn.add_argument("--coverage-threshold", type=float, default=0.5,
+                       help="C1 bbox coverage threshold in [0, 1]. A selected "
+                            "neuron must have at least this fraction of its "
+                            "tight bbox shared with other selected neurons' "
+                            "bboxes. Lower = looser packing, more neurons "
+                            "survive repair; 0 disables C1 entirely "
+                            "(everything passes the greedy phase). Default 0.5.")
+    p_syn.add_argument("--score-mode",
+                       choices=["density", "small-first", "hybrid"],
+                       default="density",
+                       help="Greedy ordering: 'density' = densest brain regions "
+                            "first (default), 'small-first' = thinnest neurons "
+                            "first (maximizes K by avoiding canvas blocking), "
+                            "'hybrid' = score / nnz (per-voxel density).")
     p_syn.add_argument("--noise-sigma", type=float, default=50.0,
                        help="Gaussian noise stdev added to intensity.am "
                             "(0 = pristine; default 50).")
@@ -420,6 +443,13 @@ def main() -> None:
     p_sw.add_argument("--rand-sigma", type=float, default=0.25)
     p_sw.add_argument("--noise-sigma", type=float, default=50.0)
     p_sw.add_argument("--noise-baseline", type=float, default=100.0)
+    p_sw.add_argument("--coverage-threshold", type=float, default=0.5,
+                      help="C1 bbox coverage threshold [0, 1]; see synthesize "
+                           "subcommand for details. Default 0.5.")
+    p_sw.add_argument("--score-mode",
+                      choices=["density", "small-first", "hybrid"],
+                      default="density",
+                      help="Greedy ordering; see synthesize subcommand.")
     p_sw.set_defaults(func=cmd_sweep)
 
     args = p.parse_args()
